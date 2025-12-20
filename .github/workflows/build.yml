@@ -1,9 +1,18 @@
-name: Build TVM ARM64 (Fix Glibc Conflict)
+name: Build Apache TVM
 
 on:
   push:
     branches: 'main'
+  schedule:
+    - cron: "0 17 * * *"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CUDA_VERSION: 13.0.2
 
 jobs:
   meta:
@@ -11,6 +20,8 @@ jobs:
     outputs:
       HASH: ${{ steps.tvm.outputs.HASH }}
       SHORT_SHA: ${{ steps.tvm.outputs.SHORT_SHA }}
+      DATE_JST:  ${{ steps.date.outputs.DATE_JST }}
+      DATE_JST_COMPACT: ${{ steps.date.outputs.DATE_JST_COMPACT }}
     steps:
       - uses: actions/github-script@v7
         id: tvm
@@ -23,11 +34,15 @@ jobs:
             });
             core.setOutput('HASH', data.object.sha);
             core.setOutput('SHORT_SHA', data.object.sha.substring(0,8));
+      - id: date
+        run: |
+          echo "DATE_JST=$(TZ=Asia/Tokyo date +%F)" >> $GITHUB_OUTPUT
+          echo "DATE_JST_COMPACT=$(TZ=Asia/Tokyo date +%Y%m%d)" >> $GITHUB_OUTPUT
 
-  # 策略一：Manylinux 容器构建 (修正版)
-  build_manylinux_container:
+  # 任务一：Manylinux 容器构建 (提供极致的 openEuler 兼容性)
+  build_manylinux:
     needs: [meta]
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,18 +56,11 @@ jobs:
           CIBW_ARCHS_LINUX: aarch64
           CIBW_BUILD: cp311-manylinux_aarch64
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
-          
-          # 核心修正：安装 llvm-devel (Manylinux 自带兼容版) 而不是下载外部二进制
-          # 这样可以避免 GLIBC 2.29 冲突
+          # 使用容器内置 llvm 以规避 GLIBC 冲突，禁用 LLD 链接器
           CIBW_BEFORE_ALL_LINUX: >
             yum install -y llvm-devel libedit-devel libxml2-devel zlib-devel ncurses-devel cmake ninja-build
-
-          # 核心修正：
-          # 1. 指定使用系统自带链接器 (USE_LLD=OFF)
-          # 2. 显式指定 llvm-config 路径
           CIBW_ENVIRONMENT: >
             TVM_CMAKE_ARGS="-G Ninja -DCMAKE_BUILD_TYPE=Release -DUSE_LLVM=ON -DUSE_CUDA=OFF -DUSE_LLD=OFF"
-          
           CIBW_BEFORE_BUILD: pip install numpy setuptools wheel cython
 
       - name: Build TVM-FFI
@@ -63,17 +71,20 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-manylinux-228
+          name: wheels-manylinux-aarch64
           path: |
             ./wheelhouse/*.whl
             3rdparty/tvm-ffi/dist/*.whl
 
-  # 策略二 & 三：宿主机构建 (保持原样，它们没这个问题)
-  build_on_host:
+  # 任务二：宿主机构建 (保留你原有的全部逻辑：uv, ccache, zstd, macOS/ARM 矩阵)
+  build:
     needs: [meta]
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-22.04-arm, ubuntu-24.04-arm]
+        # 优化：仅保留 Linux ARM 和 macOS 任务
+        os: [ubuntu-22.04-arm, ubuntu-24.04-arm, macos-latest]
+        python-version: [ '3.11']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -81,63 +92,128 @@ jobs:
           repository: 'apache/tvm'
           ref: ${{ needs.meta.outputs.HASH }}
           submodules: recursive
+          github-server-url: https://github.com
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python-version }}
 
-      - name: Install Dependencies
+      - uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: "true"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.python-version }}-${{ hashFiles('**/pyproject.toml', '3rdparty/tvm-ffi/pyproject.toml', 'CMakeLists.txt') }}
+          restore-keys: |
+            uv-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.python-version }}-
+
+      - uses: hendrikmuhs/ccache-action@v1.2.19
+        with:
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.python-version }}-llvm18-cuda${{ env.CUDA_VERSION }}-${{ needs.meta.outputs.SHORT_SHA }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.python-version }}-llvm18-cuda${{ env.CUDA_VERSION }}-
+          max-size: 5G
+
+      - name: Configure ccache
         run: |
-          sudo apt update
-          if [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
-            sudo apt install -y gcc g++ cmake ninja-build libedit-dev libxml2-dev llvm-18-dev
-            echo "LLVM_CONFIG=llvm-config-18" >> $GITHUB_ENV
-            echo "EXTRA_CXX_FLAGS=-Wno-maybe-uninitialized -Wno-array-bounds" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=2G" >> $GITHUB_ENV
+
+      - name: Install dependencies (Ubuntu ARM)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt update && sudo apt install -y gcc libtinfo-dev zlib1g-dev \
+            build-essential libedit-dev libxml2-dev llvm-18-dev llvm-18-tools clang-18 libpolly-18-dev
+          uv pip install -U pip numpy cmake ninja wheel cython build setuptools pytest
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm
+          uv pip install -U pip numpy cmake ninja wheel cython build setuptools
+
+      - name: Build zstd (PIC static)
+        if: runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 https://github.com/facebook/zstd.git
+          make -C zstd clean
+          make -C zstd ZSTD_LEGACY_SUPPORT=0 CFLAGS="-O2 -fPIC"
+          sudo make -C zstd install PREFIX=/usr/local
+          sudo ldconfig
+          rm -rf zstd
+
+      - name: Define CMake args
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            # 针对宿主机环境（Ubuntu 22.04/24.04），保持原有配置逻辑
+            # 注意：此处针对 GCC 13/14 增加了警告抑制以兼容 Ubuntu 24.04
+            echo "TVM_CMAKE_ARGS=\"-G Ninja; -DCMAKE_BUILD_TYPE=RelWithDebInfo; -DUSE_LLVM='llvm-config-18 --link-static'; -DUSE_MLIR=ON; -DUSE_CUDA=OFF; -DUSE_TENSORRT_CODEGEN=OFF; -DCMAKE_CXX_FLAGS='-Wno-maybe-uninitialized -Wno-array-bounds'\"" >> $GITHUB_ENV
           else
-            sudo apt install -y gcc g++ cmake ninja-build libedit-dev libxml2-dev llvm-15-dev
-            echo "LLVM_CONFIG=llvm-config-15" >> $GITHUB_ENV
-            echo "EXTRA_CXX_FLAGS=" >> $GITHUB_ENV
+            echo "TVM_CMAKE_ARGS=\"-G Ninja; -DCMAKE_BUILD_TYPE=RelWithDebInfo; -DUSE_LLVM='$(brew --prefix llvm)/bin/llvm-config --link-static'; -DUSE_MLIR=ON; -DUSE_METAL=ON\"" >> $GITHUB_ENV
           fi
-          pip install numpy setuptools wheel cython
 
-      - name: Build TVM Native Library
+      - name: Build python package
         run: |
-          mkdir build && cd build
-          cmake .. -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DUSE_LLVM="$LLVM_CONFIG --link-static" \
-            -DUSE_CUDA=OFF \
-            -DCMAKE_CXX_FLAGS="$EXTRA_CXX_FLAGS"
-          ninja
+          uv build --wheel . --config-settings=cmake.args=${{ env.TVM_CMAKE_ARGS }}
+          uv build --wheel 3rdparty/tvm-ffi/
 
-      - name: Package Wheel
+      - name: Test TVM
+        if: runner.os == 'Linux'
+        env:
+          TVM_TEST_TARGETS: "llvm"
         run: |
-          export TVM_LIBRARY_PATH=$(pwd)/build
-          python3 setup.py bdist_wheel
-          cd 3rdparty/tvm-ffi/ && python3 setup.py bdist_wheel
+          source .venv/bin/activate
+          ABS_TESTS="$PWD/tests/python/all-platform-minimal-test"
+          uv pip install 3rdparty/tvm-ffi/dist/apache_tvm_ffi-*.whl dist/tvm-*.whl
+          cd ..; mkdir tmp; cd tmp;
+          uv run python -c "import tvm; print(tvm.__file__); print(tvm.support.describe())"
+          uv run pytest -v "$ABS_TESTS"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}
+          name: wheels-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.python-version }}
           path: |
-            dist/*.whl
-            3rdparty/tvm-ffi/dist/*.whl
+            dist/tvm-*.whl
+            3rdparty/tvm-ffi/dist/apache_tvm_ffi-*.whl
 
+  # 任务三：聚合所有 Artifact 并发布 Release
   release:
-    needs: [meta, build_manylinux_container, build_on_host]
+    needs: [meta, build, build_manylinux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: dist
+          path: upload
           merge-multiple: true
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2.3.3
         with:
-          name: TVM ARM64 Multi-Arch [${{ needs.meta.outputs.SHORT_SHA }}]
-          tag_name: nightly-${{ github.run_number }}
-          files: dist/*.whl
+          name: Apache TVM Nightly (${{ needs.meta.outputs.DATE_JST }})
+          tag_name: nightly-${{ needs.meta.outputs.DATE_JST_COMPACT }}-tvm-${{ needs.meta.outputs.SHORT_SHA }}
+          body: |
+            ### 产物说明:
+            - **Manylinux 2.28**: 兼容 openEuler 20.03/22.03, CentOS 8+
+            - **Ubuntu 22.04/24.04**: 对应宿主机构建版 (Glibc 2.35/2.39)
+            - **macOS**: Apple Silicon 支持
+          files: |
+            upload/*.whl
+          prerelease: true
+
+      - name: Delete nightly tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete nightly --cleanup-tag --yes || true
+
+      - uses: softprops/action-gh-release@v2.3.3
+        with:
+          name: Apache TVM Nightly (latest)
+          tag_name: nightly
+          files: |
+            upload/*.whl
           prerelease: true
