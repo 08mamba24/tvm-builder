@@ -62,42 +62,47 @@ jobs:
             -DUSE_CPP_RPC=ON
           ninja
 
-      - name: Package Wheel (Fixed Logic)
+      - name: Package Wheel (Modern PEP517 Logic)
         run: |
           set -e
           ROOT_DIR="${{ github.workspace }}/tvm_src"
           PYTHON_DIR="$ROOT_DIR/python"
           BUILD_DIR="$ROOT_DIR/build"
           
-          # 1. 强制注入编译产物到 TVM 标准路径
+          # 1. 注入二进制产物
           mkdir -p "$PYTHON_DIR/tvm/lib"
           cp "$BUILD_DIR/libtvm.so" "$PYTHON_DIR/tvm/lib/"
           cp "$BUILD_DIR/libtvm_runtime.so" "$PYTHON_DIR/tvm/lib/" || true
           
-          # 2. 构建纯净的打包环境并安装所有依赖
+          # 2. 准备现代构建环境
           python3 -m venv venv
           source venv/bin/activate
-          # 核心修复：安装构建 TVM 所需的所有 Python 依赖
-          pip install --upgrade pip setuptools wheel
-          pip install numpy cython pybind11
+          pip install --upgrade pip setuptools wheel build numpy cython
           
-          # 3. 锁定核心目录打包，拒绝搜索子模块
+          # 3. 执行构建
           cd "$PYTHON_DIR"
-          echo "Building from: $(pwd)"
+          echo "Building wheel from $(pwd) using pyproject.toml"
           
-          # 检查 setup.py 是否存在（应该在 $ROOT_DIR/python/setup.py）
-          if [ ! -f "setup.py" ]; then
-            echo "Error: setup.py not found in $PYTHON_DIR"
-            ls -R
-            exit 1
+          # 使用 python -m build 替代 setup.py
+          # 环境变量设置：某些版本的 TVM 构建脚本会检查这个来决定是否打包 so
+          export TVM_LIBRARY_PATH="$PYTHON_DIR/tvm/lib"
+          python3 -m build --wheel
+          
+          # 4. 关键步骤：修正架构标记
+          # 交叉编译产出的 wheel 默认会被标记为当前系统的 x86_64
+          # 我们需要手动更名或在打包时指定，这里采用更名方式最稳妥
+          cd dist
+          ORIG_WHEEL=$(ls *.whl)
+          # 将 linux_x86_64 替换为 manylinux2014_aarch64
+          NEW_WHEEL=$(echo $ORIG_WHEEL | sed 's/linux_x86_64/manylinux2014_aarch64/g')
+          if [ "$ORIG_WHEEL" != "$NEW_WHEEL" ]; then
+            mv "$ORIG_WHEEL" "$NEW_WHEEL"
+            echo "Renamed $ORIG_WHEEL to $NEW_WHEEL"
           fi
           
-          # 执行打包，标记平台为 ARM
-          python3 setup.py bdist_wheel --plat-name manylinux2014_aarch64
-          
-          # 4. 收集产物
+          # 5. 收集产物
           mkdir -p "$ROOT_DIR/dist_final"
-          cp dist/*.whl "$ROOT_DIR/dist_final/"
+          cp "$NEW_WHEEL" "$ROOT_DIR/dist_final/"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -120,9 +125,9 @@ jobs:
           name: Apache TVM ARM64 Cross-Build (${{ needs.meta.outputs.SHORT_SHA }})
           tag_name: cross-nightly-${{ github.run_id }}
           body: |
-            ### 构建完成
+            ### 构建完成 (PEP517)
             - **Target**: aarch64
-            - **Python**: 3.12 (on Ubuntu 24.04 runner)
-            - **GLIBC**: 2.30+
+            - **Method**: Cross-compiled & build module
+            - **Compatibility**: Manylinux 2014 AARCH64
           files: upload/*.whl
           prerelease: true
