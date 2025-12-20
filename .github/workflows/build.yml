@@ -43,7 +43,14 @@ jobs:
 
       - name: Build TVM & FFI (Cross-Compile)
         run: |
+          set -e
           ROOT_DIR="${{ github.workspace }}/tvm_src"
+          
+          # 确保子模块内容存在
+          cd "$ROOT_DIR"
+          git submodule update --init --recursive
+
+          # 准备交叉编译工具链
           cat <<EOF > ${{ github.workspace }}/toolchain.cmake
           set(CMAKE_SYSTEM_NAME Linux)
           set(CMAKE_SYSTEM_PROCESSOR aarch64)
@@ -51,15 +58,22 @@ jobs:
           set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
           EOF
 
+          # 1. 编译 TVM 主库
           mkdir -p "$ROOT_DIR/build" && cd "$ROOT_DIR/build"
-          cmake .. -G Ninja -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/toolchain.cmake -DCMAKE_BUILD_TYPE=Release -DUSE_LLVM=OFF -DUSE_RPC=ON
+          cmake .. -G Ninja -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/toolchain.cmake \
+                   -DCMAKE_BUILD_TYPE=Release -DUSE_LLVM=OFF -DUSE_RPC=ON
           ninja
 
+          # 2. 编译 TVM-FFI (带防御逻辑)
           FFI_DIR="$ROOT_DIR/3rdparty/tvm-ffi"
-          if [ -d "$FFI_DIR" ]; then
+          if [ -d "$FFI_DIR" ] && [ "$(ls -A $FFI_DIR)" ]; then
+            echo "Building TVM-FFI..."
             mkdir -p "$FFI_DIR/build" && cd "$FFI_DIR/build"
-            cmake .. -G Ninja -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/toolchain.cmake -DCMAKE_BUILD_TYPE=Release
+            cmake .. -G Ninja -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/toolchain.cmake \
+                     -DCMAKE_BUILD_TYPE=Release
             ninja
+          else
+            echo "Warning: TVM-FFI directory is empty or missing, skipping build."
           fi
 
       - name: Package Wheels (TVM & FFI)
@@ -72,7 +86,7 @@ jobs:
 
           mkdir -p "$ROOT_DIR/dist_final"
 
-          # 封装重命名逻辑函数，增强鲁棒性
+          # 鲁棒性更名函数
           rename_wheel() {
             for f in *.whl; do
               if [[ "$f" == *"x86_64"* ]]; then
@@ -85,15 +99,18 @@ jobs:
 
           # 打包 TVM
           cd "$ROOT_DIR/python"
-          mkdir -p tvm/lib && cp "$ROOT_DIR/build/libtvm.so" tvm/lib/
+          mkdir -p tvm/lib
+          cp "$ROOT_DIR/build/libtvm.so" tvm/lib/
+          cp "$ROOT_DIR/build/libtvm_runtime.so" tvm/lib/ || true
           python3 -m build --wheel
           cd dist && rename_wheel && cp *.whl "$ROOT_DIR/dist_final/"
 
-          # 打包 FFI
-          FFI_PY_DIR="$ROOT_DIR/3rdparty/tvm-ffi/python"
-          if [ -d "$FFI_PY_DIR" ]; then
-            cd "$FFI_PY_DIR"
-            mkdir -p tvm_ffi/lib && cp "$ROOT_DIR/3rdparty/tvm-ffi/build/libtvm_ffi.so" tvm_ffi/lib/
+          # 打包 FFI (仅当编译成功时执行)
+          FFI_SO="$ROOT_DIR/3rdparty/tvm-ffi/build/libtvm_ffi.so"
+          if [ -f "$FFI_SO" ]; then
+            cd "$ROOT_DIR/3rdparty/tvm-ffi/python"
+            mkdir -p tvm_ffi/lib
+            cp "$FFI_SO" tvm_ffi/lib/
             python3 -m build --wheel
             cd dist && rename_wheel && cp *.whl "$ROOT_DIR/dist_final/"
           fi
