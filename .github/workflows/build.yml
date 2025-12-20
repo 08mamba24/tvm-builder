@@ -1,181 +1,85 @@
-name: Build Apache TVM
+name: Build TVM ManyLinux ARM Wheels
 
 on:
-  push:
-    branches: 'main'
-  schedule:
-    - cron: "0 17 * * *"
   workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  push:
+    branches: [ main ]
 
 env:
-  CUDA_VERSION: 13.0.2
+  # 核心：使用 glibc 2.24 的 manylinux 镜像以满足兼容性要求
+  MANYLINUX_IMAGE: "quay.io/pypa/manylinux_2_24_aarch64"
 
 jobs:
-  meta:
-    runs-on: ubuntu-latest
-    outputs:
-      HASH: ${{ steps.tvm.outputs.HASH }}
-      SHORT_SHA: ${{ steps.tvm.outputs.SHORT_SHA }}
-      DATE_JST:  ${{ steps.date.outputs.DATE_JST }}
-      DATE_JST_COMPACT: ${{ steps.date.outputs.DATE_JST_COMPACT }}
-    steps:
-      - uses: actions/github-script@v7
-        id: tvm
-        with:
-          script: |
-            const { data } = await github.rest.git.getRef({
-              owner: 'apache',
-              repo: 'tvm',
-              ref: 'heads/main',
-            });
-            core.setOutput('HASH', data.object.sha);
-            core.setOutput('SHORT_SHA', data.object.sha.substring(0,8));
-      - id: date
-        run: |
-          echo "DATE_JST=$(TZ=Asia/Tokyo date +%F)" >> $GITHUB_OUTPUT
-          echo "DATE_JST_COMPACT=$(TZ=Asia/Tokyo date +%Y%m%d)" >> $GITHUB_OUTPUT
-
-  # 任务一：Manylinux 容器构建 (增加 ldconfig 刷新库缓存)
-  build_manylinux:
-    needs: [meta]
+  # 主构建任务：在 manylinux 2.24 容器中为 ARM 架构构建 wheel
+  build_manylinux_aarch64:
     runs-on: ubuntu-22.04-arm
+    container:
+      # 所有步骤将在指定的 manylinux 容器内执行，确保环境纯净
+      image: ${{ env.MANYLINUX_IMAGE }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout TVM Code
+        uses: actions/checkout@v4
         with:
-          repository: 'apache/tvm'
-          ref: ${{ needs.meta.outputs.HASH }}
+          repository: apache/tvm
+          ref: main
           submodules: recursive
 
-      - name: Build wheels via cibuildwheel
-        uses: pypa/cibuildwheel@v2.22.0
+      - name: Install System Dependencies in Container
+        run: |
+          # 安装构建 TVM 所需的所有核心开发工具和库
+          yum install -y gcc gcc-c++ cmake ninja-build \
+            llvm-devel libedit-devel libxml2-devel \
+            zlib-devel ncurses-devel
+          # 验证编译器
+          which gcc g++ cmake llvm-config
+
+      - name: Build Wheels with cibuildwheel
+        run: |
+          # 升级 pip 并安装构建依赖
+          pip install -U pip cibuildwheel==2.22.0 numpy setuptools wheel cython
+          # 使用 cibuildwheel 执行构建，它会自动处理项目编译和打包
+          cibuildwheel --output-dir ./wheelhouse --platform linux .
         env:
-          CIBW_ARCHS_LINUX: aarch64
+          # 配置 cibuildwheel 仅构建 ARM 64位 manylinux 2.24 的包
+          CIBW_ARCHS: aarch64
           CIBW_BUILD: cp311-manylinux_aarch64
-          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
-          
-          CIBW_BEFORE_ALL_LINUX: >
-            yum install -y llvm-devel libedit-devel libxml2-devel zlib-devel ncurses-devel cmake ninja-build
-          
-          # 关键修改：编译 FFI 后必须执行 ldconfig，让 auditwheel 能在全局搜索路径找到它
-          CIBW_BEFORE_BUILD_LINUX: >
-            pip install numpy setuptools wheel cython &&
-            cd 3rdparty/tvm-ffi/ && mkdir -p build && cd build &&
-            cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$(nproc) &&
-            cp libtvm_ffi.so /usr/lib64/ &&
-            ldconfig
-          
-          CIBW_ENVIRONMENT: >
-            TVM_CMAKE_ARGS="-G Ninja -DCMAKE_BUILD_TYPE=Release -DUSE_LLVM=ON -DUSE_CUDA=OFF -DUSE_LLD=OFF"
-            LD_LIBRARY_PATH="/usr/lib64:$LD_LIBRARY_PATH"
+          CIBW_MANYLINUX_AARCH64_IMAGE: ${{ env.MANYLINUX_IMAGE }}
+          # 传递给 TVM CMake 构建系统的关键参数
+          # 重点：明确指定 LLVM 配置工具的路径，这是成功的关键
+          CIBW_ENVIRONMENT: "TVM_CMAKE_ARGS='-G Ninja -DCMAKE_BUILD_TYPE=Release -DUSE_LLVM=/usr/bin/llvm-config -DUSE_CUDA=OFF'"
 
-      - name: Build TVM-FFI standalone wheel
-        run: |
-          cd 3rdparty/tvm-ffi/
-          pip install build
-          python3 -m build --wheel .
-
-      - uses: actions/upload-artifact@v4
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: wheels-manylinux-aarch64
-          path: |
-            ./wheelhouse/*.whl
-            3rdparty/tvm-ffi/dist/*.whl
+          name: tvm-wheels-manylinux_2_24_aarch64
+          path: ./wheelhouse/*.whl
 
-  # 任务二：宿主机构建 (修正 Ubuntu 22.04 的 Polly 依赖名)
-  build:
-    needs: [meta]
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04-arm, ubuntu-24.04-arm, macos-latest]
-        python-version: [ '3.11']
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: 'apache/tvm'
-          ref: ${{ needs.meta.outputs.HASH }}
-          submodules: recursive
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          activate-environment: "true"
-
-      - name: Install dependencies (Ubuntu ARM)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt update
-          if [ "${{ matrix.os }}" = "ubuntu-22.04-arm" ]; then
-            # 修正：22.04 移除 libpolly-15-dev，改用 libpolly-dev 或依赖 llvm-15-dev
-            sudo apt install -y gcc libtinfo-dev zlib1g-dev build-essential libedit-dev libxml2-dev \
-              llvm-15-dev llvm-15-tools clang-15 libpolly-dev || \
-            sudo apt install -y gcc libtinfo-dev zlib1g-dev build-essential libedit-dev libxml2-dev \
-              llvm-15-dev llvm-15-tools clang-15
-          else
-            sudo apt install -y gcc libtinfo-dev zlib1g-dev build-essential libedit-dev libxml2-dev \
-              llvm-18-dev llvm-18-tools clang-18 libpolly-18-dev
-          fi
-          uv pip install -U pip numpy cmake ninja wheel cython build setuptools pytest
-
-      - name: Define CMake args
-        run: |
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            LLVM_CONFIG=$(which llvm-config-18 || which llvm-config-15 || which llvm-config)
-            echo "TVM_CMAKE_ARGS=\"-G Ninja; -DCMAKE_BUILD_TYPE=RelWithDebInfo; -DUSE_LLVM='$LLVM_CONFIG --link-static'; -DUSE_MLIR=ON; -DUSE_CUDA=OFF; -DUSE_TENSORRT_CODEGEN=OFF; -DCMAKE_CXX_FLAGS='-Wno-maybe-uninitialized -Wno-array-bounds'\"" >> $GITHUB_ENV
-          else
-            echo "TVM_CMAKE_ARGS=\"-G Ninja; -DCMAKE_BUILD_TYPE=RelWithDebInfo; -DUSE_LLVM='$(brew --prefix llvm)/bin/llvm-config --link-static'; -DUSE_MLIR=ON; -DUSE_METAL=ON\"" >> $GITHUB_ENV
-          fi
-
-      - name: Build python package
-        run: |
-          uv build --wheel . --config-settings=cmake.args=${{ env.TVM_CMAKE_ARGS }}
-          uv build --wheel 3rdparty/tvm-ffi/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.python-version }}
-          path: |
-            dist/tvm-*.whl
-            3rdparty/tvm-ffi/dist/apache_tvm_ffi-*.whl
-
-  release:
-    needs: [meta, build, build_manylinux]
+  # 可选：发布任务，将构建成功的 wheels 创建为 GitHub Release
+  create-release:
+    needs: [build_manylinux_aarch64]
+    # 仅在主分支的构建成功时运行
+    if: github.ref == 'refs/heads/main' && success()
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download All Wheel Artifacts
+        uses: actions/download-artifact@v4
         with:
-          path: upload
+          path: ./all-wheels
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2.3.3
+      - name: Create Nightly Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: Apache TVM Nightly (${{ needs.meta.outputs.DATE_JST }})
-          tag_name: nightly-${{ needs.meta.outputs.DATE_JST_COMPACT }}-tvm-${{ needs.meta.outputs.SHORT_SHA }}
+          name: "TVM Nightly Build (manylinux_2_24_aarch64)"
+          tag_name: nightly-${{ github.sha }}
           body: |
-            ### 产物说明:
-            - **Manylinux 2.28**: 兼容 openEuler (Glibc 2.28+)
-            - **Ubuntu 22/24 & macOS**: 原生宿主机构建版
-          files: upload/*.whl
-          prerelease: true
-
-      - name: Delete nightly tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release delete nightly --cleanup-tag --yes || true
-
-      - uses: softprops/action-gh-release@v2.3.3
-        with:
-          name: Apache TVM Nightly (latest)
-          tag_name: nightly
-          files: upload/*.whl
+            Automated nightly build of Apache TVM for **ARM64 (aarch64)**.
+            **Platform:** manylinux_2_24 (glibc >= 2.24)
+            **Build SHA:** ${{ github.sha }}
+            **Date:** ${{ fromJSON('["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]')[github.event.head_commit.timestamp[5:7]-1] }} ${{ github.event.head_commit.timestamp[8:10] }}, ${{ github.event.head_commit.timestamp[0:4] }}
+          files: |
+            ./all-wheels/**/*.whl
+          draft: false
           prerelease: true
