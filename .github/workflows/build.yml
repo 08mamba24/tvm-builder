@@ -1,4 +1,4 @@
-name: Build TVM ARM64 Multi-Environment
+name: Build TVM ARM64 (Fix Glibc Conflict)
 
 on:
   push:
@@ -24,8 +24,8 @@ jobs:
             core.setOutput('HASH', data.object.sha);
             core.setOutput('SHORT_SHA', data.object.sha.substring(0,8));
 
-  # 1. Manylinux 容器构建 (解决你目前的 openEuler 报错)
-  build_manylinux_228:
+  # 策略一：Manylinux 容器构建 (修正版)
+  build_manylinux_container:
     needs: [meta]
     runs-on: ubuntu-24.04-arm
     steps:
@@ -35,61 +35,46 @@ jobs:
           ref: ${{ needs.meta.outputs.HASH }}
           submodules: recursive
 
-      - name: Build via cibuildwheel
+      - name: Build wheels via cibuildwheel
         uses: pypa/cibuildwheel@v2.22.0
         env:
           CIBW_ARCHS_LINUX: aarch64
           CIBW_BUILD: cp311-manylinux_aarch64
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
+          
+          # 核心修正：安装 llvm-devel (Manylinux 自带兼容版) 而不是下载外部二进制
+          # 这样可以避免 GLIBC 2.29 冲突
           CIBW_BEFORE_ALL_LINUX: >
-            yum install -y libedit-devel libxml2-devel zlib-devel ncurses-devel &&
-            curl -L https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-aarch64-linux-gnu.tar.xz | tar xJ -C /usr/local --strip-components=1
+            yum install -y llvm-devel libedit-devel libxml2-devel zlib-devel ncurses-devel cmake ninja-build
+
+          # 核心修正：
+          # 1. 指定使用系统自带链接器 (USE_LLD=OFF)
+          # 2. 显式指定 llvm-config 路径
           CIBW_ENVIRONMENT: >
-            TVM_CMAKE_ARGS="-G Ninja -DCMAKE_BUILD_TYPE=Release -DUSE_LLVM='/usr/local/bin/llvm-config --link-static' -DUSE_CUDA=OFF"
+            TVM_CMAKE_ARGS="-G Ninja -DCMAKE_BUILD_TYPE=Release -DUSE_LLVM=ON -DUSE_CUDA=OFF -DUSE_LLD=OFF"
+          
           CIBW_BEFORE_BUILD: pip install numpy setuptools wheel cython
+
+      - name: Build TVM-FFI
+        run: |
+          cd 3rdparty/tvm-ffi/
+          pip install build
+          python3 -m build --wheel .
 
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-manylinux-228
-          path: ./wheelhouse/*.whl
-
-  # 2. Ubuntu 22.04 宿主机构建 (Glibc 2.35)
-  build_ubuntu_2204:
-    needs: [meta]
-    runs-on: ubuntu-22.04-arm
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: 'apache/tvm'
-          ref: ${{ needs.meta.outputs.HASH }}
-          submodules: recursive
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Dependencies
-        run: |
-          sudo apt update && sudo apt install -y gcc g++ cmake ninja-build libedit-dev libxml2-dev llvm-15-dev
-          pip install numpy setuptools wheel cython build
-
-      - name: Build
-        run: |
-          export TVM_CMAKE_ARGS="-G Ninja -DCMAKE_BUILD_TYPE=Release -DUSE_LLVM='llvm-config-15 --link-static' -DUSE_CUDA=OFF"
-          python3 -m build --wheel . --config-settings=cmake.args="$TVM_CMAKE_ARGS"
-          cd 3rdparty/tvm-ffi/ && python3 -m build --wheel .
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-ubuntu-2204
           path: |
-            dist/*.whl
+            ./wheelhouse/*.whl
             3rdparty/tvm-ffi/dist/*.whl
 
-  # 3. Ubuntu 24.04 宿主机构建 (Glibc 2.39 - 面向未来架构)
-  build_ubuntu_2404:
+  # 策略二 & 三：宿主机构建 (保持原样，它们没这个问题)
+  build_on_host:
     needs: [meta]
-    runs-on: ubuntu-24.04-arm
+    strategy:
+      matrix:
+        os: [ubuntu-22.04-arm, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -103,25 +88,43 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          sudo apt update && sudo apt install -y gcc g++ cmake ninja-build libedit-dev libxml2-dev llvm-18-dev
-          pip install numpy setuptools wheel cython build
+          sudo apt update
+          if [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+            sudo apt install -y gcc g++ cmake ninja-build libedit-dev libxml2-dev llvm-18-dev
+            echo "LLVM_CONFIG=llvm-config-18" >> $GITHUB_ENV
+            echo "EXTRA_CXX_FLAGS=-Wno-maybe-uninitialized -Wno-array-bounds" >> $GITHUB_ENV
+          else
+            sudo apt install -y gcc g++ cmake ninja-build libedit-dev libxml2-dev llvm-15-dev
+            echo "LLVM_CONFIG=llvm-config-15" >> $GITHUB_ENV
+            echo "EXTRA_CXX_FLAGS=" >> $GITHUB_ENV
+          fi
+          pip install numpy setuptools wheel cython
 
-      - name: Build
+      - name: Build TVM Native Library
         run: |
-          # 注意：针对 Ubuntu 24.04 的 GCC 13/14 警告，添加关闭参数防止编译中断
-          export TVM_CMAKE_ARGS="-G Ninja -DCMAKE_BUILD_TYPE=Release -DUSE_LLVM='llvm-config-18 --link-static' -DUSE_CUDA=OFF -DCMAKE_CXX_FLAGS='-Wno-maybe-uninitialized -Wno-array-bounds'"
-          python3 -m build --wheel . --config-settings=cmake.args="$TVM_CMAKE_ARGS"
-          cd 3rdparty/tvm-ffi/ && python3 -m build --wheel .
+          mkdir build && cd build
+          cmake .. -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_LLVM="$LLVM_CONFIG --link-static" \
+            -DUSE_CUDA=OFF \
+            -DCMAKE_CXX_FLAGS="$EXTRA_CXX_FLAGS"
+          ninja
+
+      - name: Package Wheel
+        run: |
+          export TVM_LIBRARY_PATH=$(pwd)/build
+          python3 setup.py bdist_wheel
+          cd 3rdparty/tvm-ffi/ && python3 setup.py bdist_wheel
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-ubuntu-2404-future
+          name: wheels-${{ matrix.os }}
           path: |
             dist/*.whl
             3rdparty/tvm-ffi/dist/*.whl
 
   release:
-    needs: [meta, build_manylinux_228, build_ubuntu_2204, build_ubuntu_2404]
+    needs: [meta, build_manylinux_container, build_on_host]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -131,13 +134,10 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: TVM ARM64 Multi-Arch Release [${{ needs.meta.outputs.SHORT_SHA }}]
-          tag_name: nightly-arm64-${{ github.run_number }}
-          body: |
-            - **Manylinux 2.28**: Best compatibility (openEuler 20.03/22.03)
-            - **Ubuntu 22.04**: Glibc 2.35
-            - **Ubuntu 24.04**: Glibc 2.39 (Next-gen / Future proof)
+          name: TVM ARM64 Multi-Arch [${{ needs.meta.outputs.SHORT_SHA }}]
+          tag_name: nightly-${{ github.run_number }}
           files: dist/*.whl
           prerelease: true
