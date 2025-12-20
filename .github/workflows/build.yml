@@ -43,7 +43,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # 添加 ubuntu-24.04-arm 以支持 ARMv8 构建
+        # 如果没有 GitHub ARM Runner 权限，请改为 [self-hosted, Linux, ARM64]
+        os: [ubuntu-latest, macos-latest, ubuntu-24.04-arm]
         python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
     runs-on: ${{ matrix.os }}
     steps:
@@ -65,15 +67,17 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.cache/uv
-          key: uv-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('**/pyproject.toml', '3rdparty/tvm-ffi/pyproject.toml', 'CMakeLists.txt') }}
+          # 在 key 中加入 runner.arch 以区分架构缓存
+          key: uv-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.python-version }}-${{ hashFiles('**/pyproject.toml', '3rdparty/tvm-ffi/pyproject.toml', 'CMakeLists.txt') }}
           restore-keys: |
-            uv-${{ runner.os }}-py${{ matrix.python-version }}-
+            uv-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.python-version }}-
 
       - uses: hendrikmuhs/ccache-action@v1.2.19
         with:
-          key: ccache-${{ runner.os }}-py${{ matrix.python-version }}-llvm18-cuda${{ env.CUDA_VERSION }}-${{ needs.meta.outputs.SHORT_SHA }}
+          # 在 key 中加入 runner.arch
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.python-version }}-llvm18-cuda${{ env.CUDA_VERSION }}-${{ needs.meta.outputs.SHORT_SHA }}
           restore-keys: |
-            ccache-${{ runner.os }}-py${{ matrix.python-version }}-llvm18-cuda${{ env.CUDA_VERSION }}-
+            ccache-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.python-version }}-llvm18-cuda${{ env.CUDA_VERSION }}-
           max-size: 5G
 
       - name: Configure ccache
@@ -83,7 +87,8 @@ jobs:
           echo "CCACHE_MAXSIZE=2G" >> $GITHUB_ENV
 
       - uses: Jimver/cuda-toolkit@v0.2.29
-        if: runner.os == 'Linux'
+        # 仅在 Linux x64 环境下安装 CUDA (ARM 环境通常没有 NVIDIA GPU 或需要特殊处理)
+        if: runner.os == 'Linux' && runner.arch == 'X64'
         with:
           cuda: ${{ env.CUDA_VERSION }}
           method: network
@@ -119,10 +124,19 @@ jobs:
       - name: Define CMake args
         run: |
           if [ "${{ runner.os }}" = "Linux" ]; then
-            echo "TVM_CMAKE_ARGS=\"-G Ninja; -DCMAKE_BUILD_TYPE=RelWithDebInfo; -DUSE_LLVM='llvm-config-18 --link-static'; -DUSE_MLIR=ON; -DUSE_CUDA=ON; -DUSE_TENSORRT_CODEGEN=ON\"" >> $GITHUB_ENV
+            # 区分 x64 和 ARM64 的构建参数
+            if [ "${{ runner.arch }}" = "ARM64" ]; then
+              # ARM 构建禁用 CUDA
+              echo "TVM_CMAKE_ARGS=\"-G Ninja; -DCMAKE_BUILD_TYPE=RelWithDebInfo; -DUSE_LLVM='llvm-config-18 --link-static'; -DUSE_MLIR=ON; -DUSE_CUDA=OFF; -DUSE_TENSORRT_CODEGEN=OFF\"" >> $GITHUB_ENV
+            else
+              # x64 保留 CUDA
+              echo "TVM_CMAKE_ARGS=\"-G Ninja; -DCMAKE_BUILD_TYPE=RelWithDebInfo; -DUSE_LLVM='llvm-config-18 --link-static'; -DUSE_MLIR=ON; -DUSE_CUDA=ON; -DUSE_TENSORRT_CODEGEN=ON\"" >> $GITHUB_ENV
+            fi
           else
+            # macOS 配置
             echo "TVM_CMAKE_ARGS=\"-G Ninja; -DCMAKE_BUILD_TYPE=RelWithDebInfo; -DUSE_LLVM='$(brew --prefix llvm)/bin/llvm-config --link-static'; -DUSE_MLIR=ON; -DUSE_METAL=ON\"" >> $GITHUB_ENV
           fi
+
       - name: Build python package
         run: |
           uv build --wheel . --config-settings=cmake.args=${{ env.TVM_CMAKE_ARGS }}
@@ -142,7 +156,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ runner.os }}-py${{ matrix.python-version }}
+          # artifact 名称加入架构区分
+          name: wheels-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.python-version }}
           path: |
             dist/tvm-*.whl
             3rdparty/tvm-ffi/dist/apache_tvm_ffi-*.whl
@@ -164,8 +179,9 @@ jobs:
           tag_name: nightly-${{ needs.meta.outputs.DATE_JST_COMPACT }}-tvm-${{ needs.meta.outputs.SHORT_SHA }}
           body: |
             tvm: ${{ needs.meta.outputs.HASH }}
-            CUDA: ${{ env.CUDA_VERSION }} (Linux only)
+            CUDA: ${{ env.CUDA_VERSION }} (Linux x64 only)
             Built (JST): ${{ needs.meta.outputs.DATE_JST }}
+            Supports: Linux (x86_64, aarch64/ARMv8), macOS
           files: |
             upload/dist/*.whl
             upload/3rdparty/tvm-ffi/dist/*.whl
@@ -184,8 +200,9 @@ jobs:
           tag_name: nightly
           body: |
             tvm: ${{ needs.meta.outputs.HASH }}
-            CUDA: ${{ env.CUDA_VERSION }} (Linux only)
+            CUDA: ${{ env.CUDA_VERSION }} (Linux x64 only)
             Latest build (JST): ${{ needs.meta.outputs.DATE_JST }}
+            Supports: Linux (x86_64, aarch64/ARMv8), macOS
           files: |
             upload/dist/*.whl
             upload/3rdparty/tvm-ffi/dist/*.whl
