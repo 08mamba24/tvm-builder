@@ -28,7 +28,6 @@ jobs:
     needs: [meta]
     runs-on: ubuntu-24.04
     steps:
-      # 显式指定 path 为 tvm_src，确保路径唯一可控
       - uses: actions/checkout@v4
         with:
           repository: 'apache/tvm'
@@ -40,14 +39,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu cmake ninja-build python3-dev python3-pip python3-venv
+            binutils-aarch64-linux-gnu cmake ninja-build python3-dev python3-venv
 
       - name: Build TVM (Cross-Compile)
         run: |
-          # 使用绝对路径定义变量
           ROOT_DIR="${{ github.workspace }}/tvm_src"
           BUILD_DIR="$ROOT_DIR/build"
-          
           mkdir -p "$BUILD_DIR" && cd "$BUILD_DIR"
           
           cat <<EOF > toolchain.cmake
@@ -65,48 +62,40 @@ jobs:
             -DUSE_CPP_RPC=ON
           ninja
 
-      - name: Package Wheel (Robust Logic)
+      - name: Package Wheel (Fixed Logic)
         run: |
           set -e
           ROOT_DIR="${{ github.workspace }}/tvm_src"
           PYTHON_DIR="$ROOT_DIR/python"
           BUILD_DIR="$ROOT_DIR/build"
           
-          echo "Checking directories..."
-          [ -d "$PYTHON_DIR" ] || { echo "Python dir not found at $PYTHON_DIR"; exit 1; }
-          
-          # 1. 准备库文件
+          # 1. 强制注入编译产物到 TVM 标准路径
           mkdir -p "$PYTHON_DIR/tvm/lib"
-          if [ -f "$BUILD_DIR/libtvm.so" ]; then
-            cp "$BUILD_DIR/libtvm.so" "$PYTHON_DIR/tvm/lib/"
-            cp "$BUILD_DIR/libtvm_runtime.so" "$PYTHON_DIR/tvm/lib/" || true
-            echo "Libraries staged successfully."
-          else
-            echo "Critical Error: libtvm.so not found in $BUILD_DIR"
+          cp "$BUILD_DIR/libtvm.so" "$PYTHON_DIR/tvm/lib/"
+          cp "$BUILD_DIR/libtvm_runtime.so" "$PYTHON_DIR/tvm/lib/" || true
+          
+          # 2. 构建纯净的打包环境并安装所有依赖
+          python3 -m venv venv
+          source venv/bin/activate
+          # 核心修复：安装构建 TVM 所需的所有 Python 依赖
+          pip install --upgrade pip setuptools wheel
+          pip install numpy cython pybind11
+          
+          # 3. 锁定核心目录打包，拒绝搜索子模块
+          cd "$PYTHON_DIR"
+          echo "Building from: $(pwd)"
+          
+          # 检查 setup.py 是否存在（应该在 $ROOT_DIR/python/setup.py）
+          if [ ! -f "setup.py" ]; then
+            echo "Error: setup.py not found in $PYTHON_DIR"
+            ls -R
             exit 1
           fi
           
-          # 2. 环境隔离打包 (使用 venv 避免权限问题)
-          python3 -m venv venv
-          source venv/bin/activate
-          pip install --upgrade pip setuptools wheel
-          
-          # 3. 执行打包
-          cd "$PYTHON_DIR"
-          # 鲁棒性检查：确认 setup.py 确实在当前目录
-          if [ ! -f "setup.py" ]; then
-             echo "Current directory is $(pwd). Searching for setup.py..."
-             FOUND_PATH=$(find "$ROOT_DIR" -name "setup.py" | head -n 1)
-             if [ -n "$FOUND_PATH" ]; then
-               cd "$(dirname "$FOUND_PATH")"
-             else
-               echo "Could not locate setup.py in $ROOT_DIR"; exit 1
-             fi
-          fi
-          
+          # 执行打包，标记平台为 ARM
           python3 setup.py bdist_wheel --plat-name manylinux2014_aarch64
           
-          # 4. 移动结果到统一位置
+          # 4. 收集产物
           mkdir -p "$ROOT_DIR/dist_final"
           cp dist/*.whl "$ROOT_DIR/dist_final/"
 
@@ -131,9 +120,9 @@ jobs:
           name: Apache TVM ARM64 Cross-Build (${{ needs.meta.outputs.SHORT_SHA }})
           tag_name: cross-nightly-${{ github.run_id }}
           body: |
-            ### 自动构建成功
-            - **Target**: aarch64 (ARM64)
-            - **GLIBC Compatibility**: 2.30+
-            - **Build ID**: ${{ github.run_id }}
+            ### 构建完成
+            - **Target**: aarch64
+            - **Python**: 3.12 (on Ubuntu 24.04 runner)
+            - **GLIBC**: 2.30+
           files: upload/*.whl
           prerelease: true
