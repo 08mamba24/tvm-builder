@@ -44,8 +44,6 @@ jobs:
       - name: Build TVM & FFI (Cross-Compile)
         run: |
           ROOT_DIR="${{ github.workspace }}/tvm_src"
-          
-          # 准备通用交叉编译工具链文件
           cat <<EOF > ${{ github.workspace }}/toolchain.cmake
           set(CMAKE_SYSTEM_NAME Linux)
           set(CMAKE_SYSTEM_PROCESSOR aarch64)
@@ -53,22 +51,14 @@ jobs:
           set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
           EOF
 
-          # 1. 编译 TVM 主库
           mkdir -p "$ROOT_DIR/build" && cd "$ROOT_DIR/build"
-          cmake .. -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/toolchain.cmake \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DUSE_LLVM=OFF \
-            -DUSE_RPC=ON
+          cmake .. -G Ninja -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/toolchain.cmake -DCMAKE_BUILD_TYPE=Release -DUSE_LLVM=OFF -DUSE_RPC=ON
           ninja
 
-          # 2. 编译 TVM-FFI 库
           FFI_DIR="$ROOT_DIR/3rdparty/tvm-ffi"
           if [ -d "$FFI_DIR" ]; then
             mkdir -p "$FFI_DIR/build" && cd "$FFI_DIR/build"
-            cmake .. -G Ninja \
-              -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/toolchain.cmake \
-              -DCMAKE_BUILD_TYPE=Release
+            cmake .. -G Ninja -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/toolchain.cmake -DCMAKE_BUILD_TYPE=Release
             ninja
           fi
 
@@ -76,44 +66,36 @@ jobs:
         run: |
           set -e
           ROOT_DIR="${{ github.workspace }}/tvm_src"
-          
-          # 准备 Python 虚拟环境
           python3 -m venv venv
           source venv/bin/activate
           pip install --upgrade pip setuptools wheel build numpy cython
 
-          # --- 任务 A: 打包 TVM 主包 ---
-          PYTHON_DIR="$ROOT_DIR/python"
-          mkdir -p "$PYTHON_DIR/tvm/lib"
-          cp "$ROOT_DIR/build/libtvm.so" "$PYTHON_DIR/tvm/lib/"
-          cp "$ROOT_DIR/build/libtvm_runtime.so" "$PYTHON_DIR/tvm/lib/" || true
-          
-          cd "$PYTHON_DIR"
-          export TVM_LIBRARY_PATH="$PYTHON_DIR/tvm/lib"
-          python3 -m build --wheel
-          
-          # 更名以适配 ARM 架构
-          cd dist
-          for f in *.whl; do
-            mv "$f" $(echo "$f" | sed 's/linux_x86_64/manylinux2014_aarch64/g')
-          done
           mkdir -p "$ROOT_DIR/dist_final"
-          cp *.whl "$ROOT_DIR/dist_final/"
 
-          # --- 任务 B: 打包 TVM-FFI 包 ---
+          # 封装重命名逻辑函数，增强鲁棒性
+          rename_wheel() {
+            for f in *.whl; do
+              if [[ "$f" == *"x86_64"* ]]; then
+                mv "$f" "$(echo $f | sed 's/x86_64/aarch64/g' | sed 's/linux/manylinux2014/g')"
+              elif [[ "$f" == *"any.whl" ]]; then
+                mv "$f" "$(echo $f | sed 's/py3-none-any.whl/py3-none-manylinux2014_aarch64.whl/g')"
+              fi
+            done
+          }
+
+          # 打包 TVM
+          cd "$ROOT_DIR/python"
+          mkdir -p tvm/lib && cp "$ROOT_DIR/build/libtvm.so" tvm/lib/
+          python3 -m build --wheel
+          cd dist && rename_wheel && cp *.whl "$ROOT_DIR/dist_final/"
+
+          # 打包 FFI
           FFI_PY_DIR="$ROOT_DIR/3rdparty/tvm-ffi/python"
           if [ -d "$FFI_PY_DIR" ]; then
-            mkdir -p "$FFI_PY_DIR/tvm_ffi/lib"
-            cp "$ROOT_DIR/3rdparty/tvm-ffi/build/libtvm_ffi.so" "$FFI_PY_DIR/tvm_ffi/lib/"
-            
             cd "$FFI_PY_DIR"
+            mkdir -p tvm_ffi/lib && cp "$ROOT_DIR/3rdparty/tvm-ffi/build/libtvm_ffi.so" tvm_ffi/lib/
             python3 -m build --wheel
-            
-            cd dist
-            for f in *.whl; do
-              mv "$f" $(echo "$f" | sed 's/linux_x86_64/manylinux2014_aarch64/g')
-            done
-            cp *.whl "$ROOT_DIR/dist_final/"
+            cd dist && rename_wheel && cp *.whl "$ROOT_DIR/dist_final/"
           fi
 
       - uses: actions/upload-artifact@v4
@@ -134,14 +116,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2.3.3
         with:
-          name: Apache TVM Full ARM64 Build (${{ needs.meta.outputs.SHORT_SHA }})
+          name: Apache TVM Full ARM64 Build
           tag_name: cross-nightly-${{ github.run_id }}
-          body: |
-            ### 包含的 ARM64 (aarch64) 组件：
-            1. **apache-tvm**: TVM 核心 Python 包
-            2. **apache-tvm-ffi**: TVM 核心 FFI 桥接包
-            
-            **安装说明**:
-            请同时下载并安装这两个 .whl 文件。
           files: upload/*.whl
           prerelease: true
