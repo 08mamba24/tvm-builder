@@ -38,12 +38,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu cmake ninja-build python3-dev python3-setuptools
+            binutils-aarch64-linux-gnu cmake ninja-build python3-dev python3-pip
 
       - name: Build TVM (Cross-Compile)
         run: |
           mkdir build && cd build
-          # 定义交叉编译工具链
+          # 配置交叉编译工具链
           cat <<EOF > toolchain.cmake
           set(CMAKE_SYSTEM_NAME Linux)
           set(CMAKE_SYSTEM_PROCESSOR aarch64)
@@ -51,8 +51,7 @@ jobs:
           set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
           EOF
           
-          # 禁用 LLVM 以确保在交叉编译环境下成功率最高
-          # 如果需要推理，启用 USE_RPC 和其他后端
+          # 交叉编译核心库 (关闭 LLVM 以适配通用 GLIBC)
           cmake .. -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=toolchain.cmake \
             -DCMAKE_BUILD_TYPE=Release \
@@ -63,13 +62,25 @@ jobs:
 
       - name: Package Wheel
         run: |
-          # 将编译好的 libtvm.so 放入 python 目录
-          mkdir -p python/tvm/lib
-          cp build/libtvm.so python/tvm/lib/
-          cp build/libtvm_runtime.so python/tvm/lib/ || true
+          # 确保在项目根目录下操作
+          echo "Current Path: $(pwd)"
           
-          # 使用 setuptools 打包为 ARM 架构的 wheel
+          # 关键步骤：创建内部 lib 目录并将编译出的 so 放入其中
+          mkdir -p python/tvm/lib
+          if [ -f "build/libtvm.so" ]; then
+            cp build/libtvm.so python/tvm/lib/
+            echo "Successfully copied libtvm.so to python/tvm/lib/"
+          else
+            echo "Error: build/libtvm.so not found!" && exit 1
+          fi
+          
+          # 拷贝 runtime 库（如果存在）
+          cp build/libtvm_runtime.so python/tvm/lib/ || true
+
+          # 进入 python 目录打包
           cd python
+          pip install wheel setuptools
+          # --plat-name 标记为 ARM 架构以绕过环境检查
           python3 setup.py bdist_wheel --plat-name manylinux2014_aarch64
 
       - uses: actions/upload-artifact@v4
@@ -90,13 +101,13 @@ jobs:
 
       - uses: softprops/action-gh-release@v2.3.3
         with:
-          name: Apache TVM Cross-Compiled ARM (${{ needs.meta.outputs.SHORT_SHA }})
+          name: Apache TVM ARM64 Cross-Build (${{ needs.meta.outputs.SHORT_SHA }})
           tag_name: cross-nightly-${{ github.run_id }}
           body: |
-            ### 编译说明:
-            - **架构**: aarch64 (ARM64)
-            - **构建环境**: Ubuntu 24.04 (Cross-compiled)
-            - **LLVM**: Disabled (仅限 Runtime 和基础编译)
-            - **基础 GLIBC**: 取决于交叉编译器版本 (通常为 2.30+，适配 openEuler)
+            ### 产物信息
+            - **架构**: ARM64 (aarch64)
+            - **编译环境**: Cross-compiled from Ubuntu 24.04
+            - **GLIBC 兼容性**: 理论支持 2.30+ (适配 openEuler 2.34)
+            - **包含组件**: TVM Runtime, RPC Server, Python Bindings (No LLVM)
           files: upload/*.whl
           prerelease: true
