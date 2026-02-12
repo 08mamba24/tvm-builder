@@ -1,3 +1,7 @@
+# Note: armv7 (32-bit ARM) is not supported by GitHub Actions hosted runners.
+# GitHub Actions only provides arm64 (ARM64/AArch64) runners.
+# To build armv7, you would need self-hosted ARM32 runners or cross-compilation.
+
 name: Build Apache TVM
 
 on:
@@ -9,9 +13,6 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  CUDA_VERSION: 13.0.2
 
 jobs:
   meta:
@@ -29,7 +30,7 @@ jobs:
             const { data } = await github.rest.git.getRef({
               owner: 'apache',
               repo: 'tvm',
-              ref: 'heads/main',
+              ref: 'tags/v0.22.0',
             });
             core.setOutput('HASH', data.object.sha);
             core.setOutput('SHORT_SHA', data.object.sha.substring(0,8));
@@ -43,9 +44,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
-    runs-on: ${{ matrix.os }}
+        arch: ['x86_64', 'arm64']
+        python-version: ['3.11']
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
@@ -65,15 +66,15 @@ jobs:
       - uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ~/.cache/uv
-          key: uv-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('**/pyproject.toml', '3rdparty/tvm-ffi/pyproject.toml', 'CMakeLists.txt') }}
+          key: uv-${{ runner.os }}-${{ matrix.arch }}-py3.11-${{ hashFiles('**/pyproject.toml', '3rdparty/tvm-ffi/pyproject.toml', 'CMakeLists.txt') }}
           restore-keys: |
-            uv-${{ runner.os }}-py${{ matrix.python-version }}-
+            uv-${{ runner.os }}-${{ matrix.arch }}-py3.11-
 
       - uses: hendrikmuhs/ccache-action@5ebbd400eff9e74630f759d94ddd7b6c26299639 # v1.2.20
         with:
-          key: ccache-${{ runner.os }}-py${{ matrix.python-version }}-llvm18-cuda${{ env.CUDA_VERSION }}-${{ needs.meta.outputs.SHORT_SHA }}
+          key: ccache-${{ runner.os }}-${{ matrix.arch }}-py3.11-llvm18-${{ needs.meta.outputs.SHORT_SHA }}
           restore-keys: |
-            ccache-${{ runner.os }}-py${{ matrix.python-version }}-llvm18-cuda${{ env.CUDA_VERSION }}-
+            ccache-${{ runner.os }}-${{ matrix.arch }}-py3.11-llvm18-
           max-size: 5G
 
       - name: Configure ccache
@@ -82,15 +83,7 @@ jobs:
           echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
           echo "CCACHE_MAXSIZE=2G" >> $GITHUB_ENV
 
-      - uses: Jimver/cuda-toolkit@b6fc3a9f3f15256d9d94ffe1254f9c5a2565cde6 # v0.2.30
-        if: runner.os == 'Linux'
-        with:
-          cuda: ${{ env.CUDA_VERSION }}
-          method: network
-          log-file-suffix: '${{matrix.os}}.txt'
-
       - name: Install dependencies (Ubuntu)
-        if: runner.os == 'Linux'
         run: |
           sudo apt update && sudo apt install -y gcc libtinfo-dev zlib1g-dev \
             build-essential libedit-dev libxml2-dev llvm-18-dev llvm-18-tools clang-18 libpolly-18-dev
@@ -98,14 +91,7 @@ jobs:
           sudo rm -rf /var/lib/apt/lists/*
           uv pip install -U pip numpy cmake ninja wheel cython build setuptools pytest
 
-      - name: Install dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install llvm
-          uv pip install -U pip numpy cmake ninja wheel cython build setuptools
-
       - name: Build zstd (PIC static)
-        if: runner.os == 'Linux'
         run: |
           set -euxo pipefail
           git clone --depth 1 https://github.com/facebook/zstd.git
@@ -118,18 +104,13 @@ jobs:
 
       - name: Define CMake args
         run: |
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            echo "TVM_CMAKE_ARGS=\"-G Ninja; -DCMAKE_BUILD_TYPE=RelWithDebInfo; -DUSE_LLVM='llvm-config-18 --link-static'; -DUSE_MLIR=ON; -DUSE_CUDA=ON; -DUSE_TENSORRT_CODEGEN=ON\"" >> $GITHUB_ENV
-          else
-            echo "TVM_CMAKE_ARGS=\"-G Ninja; -DCMAKE_BUILD_TYPE=RelWithDebInfo; -DUSE_LLVM='$(brew --prefix llvm)/bin/llvm-config --link-static'; -DUSE_MLIR=ON; -DUSE_METAL=ON\"" >> $GITHUB_ENV
-          fi
+          echo "TVM_CMAKE_ARGS=\"-G Ninja; -DCMAKE_BUILD_TYPE=RelWithDebInfo; -DUSE_LLVM='llvm-config-18 --link-static'; -DUSE_MLIR=ON\"" >> $GITHUB_ENV
       - name: Build python package
         run: |
           uv build --wheel . --config-settings=cmake.args=${{ env.TVM_CMAKE_ARGS }}
           uv build --wheel 3rdparty/tvm-ffi/
 
       - name: Test TVM
-        if: runner.os == 'Linux'
         env:
           TVM_TEST_TARGETS: "llvm"
         run: |
@@ -142,7 +123,7 @@ jobs:
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: wheels-${{ runner.os }}-py${{ matrix.python-version }}
+          name: wheels-${{ runner.os }}-${{ matrix.arch }}-py3.11
           path: |
             dist/tvm-*.whl
             3rdparty/tvm-ffi/dist/apache_tvm_ffi-*.whl
@@ -160,11 +141,14 @@ jobs:
 
       - uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
-          name: Apache TVM Weekly (${{ needs.meta.outputs.DATE_JST }}) [tvm ${{ needs.meta.outputs.SHORT_SHA }}]
-          tag_name: weekly-${{ needs.meta.outputs.DATE_JST_COMPACT }}-tvm-${{ needs.meta.outputs.SHORT_SHA }}
+          name: Apache TVM Weekly (${{ needs.meta.outputs.DATE_JST }}) [v0.22.0] [${{ needs.meta.outputs.SHORT_SHA }}]
+          tag_name: weekly-${{ needs.meta.outputs.DATE_JST_COMPACT }}-v0.22.0-${{ needs.meta.outputs.SHORT_SHA }}
           body: |
             tvm: ${{ needs.meta.outputs.HASH }}
-            CUDA: ${{ env.CUDA_VERSION }} (Linux only)
+            Version: v0.22.0
+            Architectures: x86_64, arm64
+            Python: 3.11
+            Features: CPU-only (LLVM + MLIR)
             Built (JST): ${{ needs.meta.outputs.DATE_JST }}
           files: |
             upload/dist/*.whl
@@ -184,7 +168,10 @@ jobs:
           tag_name: weekly
           body: |
             tvm: ${{ needs.meta.outputs.HASH }}
-            CUDA: ${{ env.CUDA_VERSION }} (Linux only)
+            Version: v0.22.0
+            Architectures: x86_64, arm64
+            Python: 3.11
+            Features: CPU-only (LLVM + MLIR)
             Latest build (JST): ${{ needs.meta.outputs.DATE_JST }}
           files: |
             upload/dist/*.whl
