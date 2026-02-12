@@ -220,9 +220,39 @@ jobs:
 
       - name: Install LLVM
         run: |
-          yum install -y llvm18-devel llvm18-tools clang18 || \
-          yum install -y llvm-devel llvm-tools clang || \
-          echo "WARNING: LLVM 18 not available, falling back to system LLVM"
+          echo "========================================"
+          echo "Installing LLVM 18..."
+          echo "========================================"
+          
+          # 尝试安装LLVM 18
+          if yum list llvm18-devel 2>/dev/null; then
+            yum install -y llvm18-devel llvm18-tools clang18
+            echo "✓ LLVM 18 installed via llvm18-devel"
+          else
+            echo "WARNING: llvm18-devel not available, trying llvm-devel..."
+            yum install -y llvm-devel llvm-tools clang || echo "WARNING: llvm-devel not available, trying system LLVM"
+          fi
+          
+          # 验证llvm-config-18是否存在
+          if ! command -v llvm-config-18; then
+            echo "❌ ERROR: llvm-config-18 not found after installation"
+            echo "Attempting to create symlink..."
+            
+            # 如果llvm18-config不存在，尝试从llvm-config创建符号链接
+            if [ -f /usr/bin/llvm-config-18 ]; then
+              echo "✓ llvm-config-18 exists"
+            elif [ -f /usr/bin/llvm-config ]; then
+              echo "Creating symlink from llvm-config to llvm-config-18..."
+              ln -sf /usr/bin/llvm-config /usr/bin/llvm-config-18
+              echo "✓ Symlink created"
+            else
+              echo "❌ ERROR: Neither llvm-config nor llvm-config-18 found"
+              exit 1
+            fi
+          fi
+          
+          echo "========================================"
+          echo "✓ LLVM 18 installation verified"
 
       - name: Build zstd (PIC static)
         run: |
