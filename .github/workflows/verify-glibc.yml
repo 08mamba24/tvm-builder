@@ -1,0 +1,120 @@
+name: Verify GLIBC Version
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    branches: ['main']
+    paths:
+      - '.github/workflows/verify-glibc.yml'
+
+jobs:
+  verify-openeuler:
+    name: Verify openEuler 22.03 GLIBC
+    runs-on: ubuntu-latest
+    container:
+      image: openeuler/openeuler:22.03-lts-aarch64
+      options: --platform linux/arm64
+    steps:
+      - name: Verify GLIBC version
+        run: |
+          echo "========================================"
+          echo "Checking GLIBC version..."
+          echo "========================================"
+          ldd --version | head -1
+
+      - name: Get detailed GLIBC info
+        run: |
+          echo "========================================"
+          echo "Detailed GLIBC info..."
+          echo "========================================"
+          strings /lib64/libc.so.6 | grep "GLIBC_" | sort -V | tail -10
+
+      - name: Check system info
+        run: |
+          echo "========================================"
+          echo "System Information..."
+          echo "========================================"
+          cat /etc/os-release | head -10
+          echo "---"
+          uname -a
+
+      - name: Verify architecture
+        run: |
+          echo "========================================"
+          echo "Architecture Verification..."
+          echo "========================================"
+          echo "Machine type: $(uname -m)"
+          arch || echo "arch command not found"
+          file /bin/bash | grep -o "ARM64\|aarch64" || echo "Binary check: ARM64 not detected in bash"
+
+      - name: Check package manager
+        run: |
+          echo "========================================"
+          echo "Package Manager Check..."
+          echo "========================================"
+          if command -v yum; then
+            echo "Package Manager: yum"
+            yum --version
+          fi
+          if command -v dnf; then
+            echo "Package Manager: dnf"
+            dnf --version
+          fi
+
+      - name: Verify Python availability
+        run: |
+          echo "========================================"
+          echo "Python Check..."
+          echo "========================================"
+          if command -v python3; then
+            python3 --version
+            echo "Python3 location: $(which python3)"
+          else
+            echo "ERROR: Python3 not found"
+            exit 1
+          fi
+
+      - name: Search for LLVM
+        run: |
+          echo "========================================"
+          echo "LLVM Search..."
+          echo "========================================"
+          yum list | grep -i llvm | head -20 || dnf list | grep -i llvm | head -20
+
+      - name: Search for CMake
+        run: |
+          echo "========================================"
+          echo "CMake Search..."
+          echo "========================================"
+          yum list | grep -i cmake | head -10 || dnf list | grep -i cmake | head -10
+
+      - name: Search for Ninja
+        run: |
+          echo "========================================"
+          echo "Ninja Search..."
+          echo "========================================"
+          yum list | grep -i ninja | head -10 || dnf list | grep -i ninja | head -10
+
+      - name: Search for build tools
+        run: |
+          echo "========================================"
+          echo "Build Tools Search..."
+          echo "========================================"
+          echo "--- GCC ---"
+          yum list | grep -i "^gcc" | head -5 || dnf list | grep -i "^gcc" | head -5
+          echo "--- Make ---"
+          yum list | grep -i "^make" | head -5 || dnf list | grep -i "^make" | head -5
+
+      - name: Summary
+        run: |
+          echo "========================================"
+          echo "Verification Summary"
+          echo "========================================"
+          echo "This verification checks:"
+          echo "1. GLIBC version (should be 2.34)"
+          echo "2. System architecture (should be aarch64/ARM64)"
+          echo "3. Package manager availability"
+          echo "4. Python availability"
+          echo "5. Build tools availability (LLVM, CMake, Ninja, GCC, Make)"
+          echo ""
+          echo "Expected: All checks pass with GLIBC 2.34"
