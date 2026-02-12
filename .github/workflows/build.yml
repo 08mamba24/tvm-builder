@@ -183,7 +183,10 @@ jobs:
 
       - name: Install Python build tools
         run: |
-          python3 -m pip install -U pip build numpy cython pytest wheel
+          yum reinstall -y python3-pip || true
+          python3 -m ensurepip --upgrade pip || true
+          python3 -m pip install -U pip || true
+          python3 -m pip install build numpy cython pytest wheel
 
       - name: Build python packages
         run: |
