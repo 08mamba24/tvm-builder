@@ -163,6 +163,60 @@ jobs:
           yum install -y cmake ninja-build
           yum install -y git
           yum install -y libxml2-devel zlib-devel ncurses-devel
+          yum install -y elfutils
+          
+      - name: Verify all required dependencies
+        run: |
+          echo "========================================"
+          echo "Verifying critical dependencies..."
+          echo "========================================"
+          
+          for cmd in gcc g++ make cmake3 ninja-build; do
+            if ! command -v $cmd; then
+              echo "❌ ERROR: $cmd not found"
+              exit 1
+            fi
+            echo "✓ $cmd found at: $(which $cmd)"
+          done
+          
+          for cmd in python3 python3-pip; do
+            if ! command -v $cmd; then
+              echo "❌ ERROR: $cmd not found"
+              exit 1
+            fi
+            echo "✓ $cmd found"
+          done
+          
+          python_version=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
+          if [ "$(echo "$python_version" | cut -d. -f1)" -lt 3 ]; then
+            echo "❌ ERROR: Python >= 3.8 required, found: $python_version"
+            exit 1
+          fi
+          echo "✓ Python version: $python_version (>= 3.8 ✓)"
+          
+          if ! command -v llvm-config-18; then
+            echo "❌ ERROR: llvm-config-18 not found"
+            echo "Please check LLVM 18 installation"
+            exit 1
+          fi
+          echo "✓ LLVM 18 found: $(llvm-config-18 --version)"
+          
+          if ! command -v patchelf; then
+            echo "❌ ERROR: patchelf not found"
+            echo "auditwheel requires patchelf tool from elfutils package"
+            exit 1
+          fi
+          echo "✓ patchelf found: $(which patchelf)"
+          
+          if ! command -v zstd; then
+            echo "❌ ERROR: zstd not found"
+            exit 1
+          fi
+          echo "✓ zstd found: $(zstd --version)"
+          
+          echo "========================================"
+          echo "✅ All dependencies verified successfully!"
+          echo "========================================"
 
       - name: Install LLVM
         run: |
@@ -188,9 +242,24 @@ jobs:
           python3 -m pip install -U pip || true
           python3 -m pip install build numpy cython pytest wheel
 
+      - name: Create CMake config
+        run: |
+          mkdir -p build
+          cp cmake/config.cmake build/config.cmake
+          
+          echo 'set(CMAKE_BUILD_TYPE RelWithDebInfo)' >> build/config.cmake
+          echo 'set(USE_LLVM "llvm-config --ignore-libllvm --link-static")' >> build/config.cmake
+          echo 'set(HIDE_PRIVATE_SYMBOLS ON)' >> build/config.cmake
+          
+          echo 'set(USE_CUDA   OFF)' >> build/config.cmake
+          echo 'set(USE_METAL  OFF)' >> build/config.cmake
+          echo 'set(USE_VULKAN OFF)' >> build/config.cmake
+          echo 'set(USE_OPENCL OFF)' >> build/config.cmake
+          echo 'set(USE_CUBLAS OFF)' >> build/config.cmake
+          echo 'set(USE_CUDNN  OFF)' >> build/config.cmake
+          echo 'set(USE_CUTLASS OFF)' >> build/config.cmake
+          
       - name: Build python packages
-        env:
-          LLVM_CONFIG: "llvm-config-18 --link-static"
         run: |
           python3 -m build --wheel . 
           python3 -m build --wheel 3rdparty/tvm-ffi/
