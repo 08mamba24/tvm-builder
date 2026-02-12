@@ -188,14 +188,9 @@ jobs:
           python3 -m pip install -U pip || true
           python3 -m pip install build numpy cython pytest wheel
 
-      - name: Create CMake config
-        run: |
-          mkdir -p build cmake
-          echo 'set(CMAKE_BUILD_TYPE RelWithDebInfo)' > config.cmake
-          echo 'set(USE_LLVM "llvm-config-18 --link-static")' >> config.cmake
-          echo 'set(USE_MLIR ON)' >> config.cmake
-          cp config.cmake cmake/config.cmake
       - name: Build python packages
+        env:
+          LLVM_CONFIG: "llvm-config-18 --link-static"
         run: |
           python3 -m build --wheel . 
           python3 -m build --wheel 3rdparty/tvm-ffi/
