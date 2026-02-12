@@ -179,7 +179,7 @@ jobs:
             echo "✓ $cmd found at: $(which $cmd)"
           done
           
-          for cmd in python3 python3-pip; do
+          for cmd in python3 pip3; do
             if ! command -v $cmd; then
               echo "❌ ERROR: $cmd not found"
               exit 1
