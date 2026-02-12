@@ -190,8 +190,7 @@ jobs:
 
       - name: Create CMake config
         run: |
-          cp ../cmake/config.cmake config.cmake
-          echo 'set(CMAKE_BUILD_TYPE RelWithDebInfo)' >> config.cmake
+          echo 'set(CMAKE_BUILD_TYPE RelWithDebInfo)' > config.cmake
           echo 'set(USE_LLVM "llvm-config-18 --link-static")' >> config.cmake
           echo 'set(USE_MLIR ON)' >> config.cmake
       - name: Build python packages
