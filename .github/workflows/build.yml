@@ -190,7 +190,7 @@ jobs:
 
       - name: Build python packages
         run: |
-          python3 -m build --wheel . --config-settings=cmake.args="${TVM_CMAKE_ARGS}"
+          python3 -m build --wheel . --config-settings="${TVM_CMAKE_ARGS}"
           python3 -m build --wheel 3rdparty/tvm-ffi/
 
       - name: Repair wheels with auditwheel
