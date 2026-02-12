@@ -136,6 +136,20 @@ jobs:
     env:
       TVM_CMAKE_ARGS: "-G Ninja; -DCMAKE_BUILD_TYPE=RelWithDebInfo; -DUSE_LLVM='llvm-config-18 --link-static'; -DUSE_MLIR=ON"
     steps:
+      - name: Upgrade Git for submodule support
+        run: |
+          yum install -y wget tar
+          wget https://github.com/git/git/archive/refs/tags/v2.45.0.tar.gz -O git.tar.gz
+          tar -xzf git.tar.gz
+          cd git-2.45.0
+          make configure
+          ./configure --prefix=/usr/local
+          make -j$(nproc)
+          make install
+          cd ..
+          rm -rf git-2.45.0 git.tar.gz
+          git --version
+
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           repository: 'apache/tvm'
