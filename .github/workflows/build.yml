@@ -133,8 +133,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     container:
       image: openeuler/openeuler:22.03-lts-sp4
-    env:
-      TVM_CMAKE_ARGS: "-G Ninja; -DCMAKE_BUILD_TYPE=RelWithDebInfo; -DUSE_LLVM='llvm-config-18 --link-static'; -DUSE_MLIR=ON"
+      env:
+        TVM_CMAKE_ARGS: "-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DUSE_LLVM='llvm-config-18 --link-static' -DUSE_MLIR=ON"
     steps:
       - name: Upgrade Git for submodule support
         run: |
@@ -190,7 +190,7 @@ jobs:
 
       - name: Build python packages
         run: |
-          python3 -m build --wheel . --config-settings="${TVM_CMAKE_ARGS}"
+          python3 -m build --wheel . --config-settings="cmake.args=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DUSE_LLVM='llvm-config-18 --link-static' -DUSE_MLIR=ON"
           python3 -m build --wheel 3rdparty/tvm-ffi/
 
       - name: Repair wheels with auditwheel
