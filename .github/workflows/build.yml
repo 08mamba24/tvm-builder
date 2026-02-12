@@ -189,8 +189,10 @@ jobs:
           python3 -m pip install build numpy cython pytest wheel
 
       - name: Build python packages
+        env:
+          SKBUILD_CMAKE_ARGS: "-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DUSE_LLVM='llvm-config-18 --link-static' -DUSE_MLIR=ON"
         run: |
-          python3 -m build --wheel . --config-setting="cmake.args=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DUSE_LLVM='llvm-config-18 --link-static' -DUSE_MLIR=ON"
+          python3 -m build --wheel . 
           python3 -m build --wheel 3rdparty/tvm-ffi/
 
       - name: Repair wheels with auditwheel
