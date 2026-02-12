@@ -128,8 +128,88 @@ jobs:
             dist/tvm-*.whl
             3rdparty/tvm-ffi/dist/apache_tvm_ffi-*.whl
 
+  build-openeuler-arm64:
+    needs: [meta]
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: openeuler/openeuler:22.03-lts-sp4
+    env:
+      TVM_CMAKE_ARGS: "-G Ninja; -DCMAKE_BUILD_TYPE=RelWithDebInfo; -DUSE_LLVM='llvm-config-18 --link-static'; -DUSE_MLIR=ON"
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          repository: 'apache/tvm'
+          ref: ${{ needs.meta.outputs.HASH }}
+          submodules: recursive
+          github-server-url: https://github.com
+
+      - name: Check GLIBC version
+        run: |
+          echo "========================================"
+          echo "GLIBC Version:"
+          ldd --version | head -1
+          echo "========================================"
+
+      - name: Install dependencies (openEuler)
+        run: |
+          yum update -y
+          yum install -y python3 python3-pip python3-devel
+          yum install -y gcc gcc-c++ make
+          yum install -y cmake ninja-build
+          yum install -y git
+          yum install -y libxml2-devel zlib-devel ncurses-devel
+
+      - name: Install LLVM
+        run: |
+          yum install -y llvm18-devel llvm18-tools clang18 || \
+          yum install -y llvm-devel llvm-tools clang || \
+          echo "WARNING: LLVM 18 not available, falling back to system LLVM"
+
+      - name: Build zstd (PIC static)
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 https://github.com/facebook/zstd.git
+          make -C zstd clean
+          make -C zstd ZSTD_LEGACY_SUPPORT=0 CFLAGS="-O2 -fPIC"
+          make -C zstd install PREFIX=/usr/local
+          echo "/usr/local/lib" > /etc/ld.so.conf.d/zz-local.conf
+          ldconfig
+          rm -rf zstd
+
+      - name: Install Python build tools
+        run: |
+          python3 -m pip install -U pip build numpy cython pytest wheel
+
+      - name: Build python packages
+        run: |
+          python3 -m build --wheel . --config-settings=cmake.args="${TVM_CMAKE_ARGS}"
+          python3 -m build --wheel 3rdparty/tvm-ffi/
+
+      - name: Repair wheels with auditwheel
+        run: |
+          python3 -m pip install auditwheel
+          mkdir -p wheelhouse
+          auditwheel repair --plat manylinux_2_34_aarch64 -w wheelhouse dist/tvm-*.whl
+          auditwheel repair --plat manylinux_2_34_aarch64 -w wheelhouse 3rdparty/tvm-ffi/dist/apache_tvm_ffi-*.whl
+          ls -lh wheelhouse/
+
+      - name: Test TVM
+        env:
+          TVM_TEST_TARGETS: "llvm"
+        run: |
+          python3 -m pip install wheelhouse/*.whl
+          python3 -c "import tvm; print(tvm.__version__); print(tvm.support.describe())"
+          ABS_TESTS="$PWD/tests/python/all-platform-minimal-test"
+          cd ..; mkdir tmp; cd tmp;
+          python3 -m pytest -v "$ABS_TESTS"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: wheels-openeuler-arm64-py3.11
+          path: wheelhouse/*.whl
+
   release:
-    needs: [meta, build]
+    needs: [meta, build, build-openeuler-arm64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -146,13 +226,14 @@ jobs:
           body: |
             tvm: ${{ needs.meta.outputs.HASH }}
             Version: v0.22.0
-            Architectures: x86_64, arm64
+            Architectures: x86_64, arm64 (Ubuntu), arm64 (openEuler 22.03)
             Python: 3.11
             Features: CPU-only (LLVM + MLIR)
             Built (JST): ${{ needs.meta.outputs.DATE_JST }}
           files: |
             upload/dist/*.whl
             upload/3rdparty/tvm-ffi/dist/*.whl
+            upload/wheelhouse/*.whl
           prerelease: true
           fail_on_unmatched_files: true
 
@@ -169,12 +250,13 @@ jobs:
           body: |
             tvm: ${{ needs.meta.outputs.HASH }}
             Version: v0.22.0
-            Architectures: x86_64, arm64
+            Architectures: x86_64, arm64 (Ubuntu), arm64 (openEuler 22.03)
             Python: 3.11
             Features: CPU-only (LLVM + MLIR)
             Latest build (JST): ${{ needs.meta.outputs.DATE_JST }}
           files: |
             upload/dist/*.whl
             upload/3rdparty/tvm-ffi/dist/*.whl
+            upload/wheelhouse/*.whl
           prerelease: true
           fail_on_unmatched_files: true
