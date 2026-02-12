@@ -12,7 +12,7 @@ jobs:
     name: Verify openEuler 22.03 GLIBC
     runs-on: ubuntu-latest
     container:
-      image: openeuler/openeuler:22.03-lts-aarch64
+      image: openeuler/openeuler:22.03-lts-sp4
       options: --platform linux/arm64
     steps:
       - name: Verify GLIBC version
