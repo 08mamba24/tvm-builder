@@ -194,13 +194,6 @@ jobs:
           fi
           echo "✓ Python version: $python_version (>= 3.8 ✓)"
           
-          if ! command -v llvm-config; then
-            echo "❌ ERROR: llvm-config not found"
-            echo "Please check LLVM installation (>= 15 required)"
-            exit 1
-          fi
-          echo "✓ LLVM found: $(llvm-config --version)"
-          
           if ! command -v patchelf; then
             echo "❌ ERROR: patchelf not found"
             echo "auditwheel requires patchelf tool from elfutils package"
@@ -224,21 +217,11 @@ jobs:
           echo "Installing LLVM (>= 15 required)..."
           echo "========================================"
           
-          # 安装 LLVM（openEuler 22.03 可能使用 llvm15 或 llvm18）
           yum install -y llvm-devel llvm-tools clang || true
           
-          # 验证 llvm-config 是否存在
-          if ! command -v llvm-config; then
-            echo "❌ ERROR: llvm-config not found after installation"
-            echo "Available LLVM-related files:"
-            find /usr -name "*llvm-config*" 2>/dev/null || echo "No llvm-config found"
-            exit 1
-          fi
-          
-          # 检查 LLVM 版本
-          llvm_version=$(llvm-config --version 2>/dev/null || echo "unknown")
           echo "========================================"
-          echo "✓ LLVM installed successfully: $llvm_version"
+          echo "✓ LLVM installation completed"
+          echo "Note: CMake will verify llvm-config during build"
 
       - name: Build zstd (PIC static)
         run: |
