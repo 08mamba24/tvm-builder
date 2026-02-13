@@ -155,14 +155,18 @@ jobs:
           ldd --version | head -1
           echo "========================================"
 
-      - name: Install dependencies (openEuler)
+      - name: Update package cache (openEuler)
         run: |
           yum update -y
+
+      - name: Install dependencies (openEuler)
+        run: |
           yum install -y python3 python3-pip python3-devel
           yum install -y gcc gcc-c++ make
           yum install -y cmake ninja-build
           yum install -y git
           yum install -y libxml2-devel zlib-devel ncurses-devel
+          # elfutils provides patchelf, required by auditwheel
           yum install -y elfutils
           
       - name: Verify all required dependencies
@@ -241,6 +245,13 @@ jobs:
           python3 -m pip install -U pip || true
           python3 -m pip install build numpy cython pytest wheel
 
+      - name: Verify auditwheel installation
+        run: |
+          echo "========================================"
+          echo "auditwheel version:"
+          python3 -m pip show auditwheel || echo "auditwheel not yet installed via pip"
+          echo "========================================"
+
       - name: Create CMake config
         run: |
           mkdir -p build
@@ -265,7 +276,7 @@ jobs:
 
       - name: Repair wheels with auditwheel
         run: |
-          python3 -m pip install auditwheel
+          python3 -m pip install -U auditwheel
           mkdir -p wheelhouse
           auditwheel repair --plat manylinux_2_34_aarch64 -w wheelhouse dist/tvm-*.whl
           auditwheel repair --plat manylinux_2_34_aarch64 -w wheelhouse 3rdparty/tvm-ffi/dist/apache_tvm_ffi-*.whl
